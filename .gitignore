@@ -1,0 +1,24 @@
+# Data — Bloomberg is licensed, parquet cache is reproducible from raw
+data/raw/
+data/processed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Distribution / packaging
+*.egg-info/
+build/
+dist/

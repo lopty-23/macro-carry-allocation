@@ -51,6 +51,17 @@ YIELD_TO_ETF: dict[str, str] = {
     "LUATTRUU": "IEF", "LUTLTRUU": "TLT", "LUACTRUU": "LQD",
 }
 
+DEFAULT_FUTURES_PATH = REPO_ROOT / "data" / "raw" / "commodity_futures.xlsx"
+
+COMMODITY_ROOTS: list[str] = [
+    "CL", "CO", "HO", "XB", "NG", "GC", "SI",
+    "LA", "LX", "LP", "C", "W", "S", "SB",
+]
+
+FUTURES_COLUMNS: list[str] = [
+    f"{root}_{m}" for root in COMMODITY_ROOTS for m in ("M1", "M2")
+]
+
 TRADING_DAYS_PER_YEAR: int = 252
 
 def _parse_multi_date_sheet(
@@ -101,8 +112,18 @@ def load_rf(path: Path = DEFAULT_RAW_PATH) -> pd.Series:
     daily_rf.name = "risk_free_return"
     return daily_rf
 
+def load_commodity_futures(path: Path = DEFAULT_FUTURES_PATH) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Commodity futures workbook not found at {path}.\n"
+            f"See README for the Bloomberg field list."
+        )
+    futures = _parse_multi_date_sheet(path, "futures", FUTURES_COLUMNS)
+    return futures.ffill()
+
 def load_all(
     path: Path = DEFAULT_RAW_PATH,
+    futures_path: Path = DEFAULT_FUTURES_PATH,
     cache_dir: Path = DEFAULT_CACHE_DIR,
     force_refresh: bool = False,
 ) -> dict:
@@ -112,6 +133,7 @@ def load_all(
         "equity_ey":   cache_dir / "equity_ey.parquet",
         "bond_yields": cache_dir / "bond_yields.parquet",
         "rf":          cache_dir / "rf.parquet",
+        "futures":     cache_dir / "futures.parquet",
     }
 
     all_cached = all(p.exists() for p in cache_paths.values())
@@ -121,23 +143,27 @@ def load_all(
             "equity_ey":   pd.read_parquet(cache_paths["equity_ey"]),
             "bond_yields": pd.read_parquet(cache_paths["bond_yields"]),
             "rf":          pd.read_parquet(cache_paths["rf"])["risk_free_return"],
+            "futures":     pd.read_parquet(cache_paths["futures"]),
         }
 
     prices = load_prices(path)
     equity_ey = load_equity_earnings_yields(path)
     bond_yields = load_bond_yields(path)
     rf = load_rf(path)
+    futures = load_commodity_futures(futures_path)
 
     prices.to_parquet(cache_paths["prices"])
     equity_ey.to_parquet(cache_paths["equity_ey"])
     bond_yields.to_parquet(cache_paths["bond_yields"])
     rf.to_frame().to_parquet(cache_paths["rf"])
+    futures.to_parquet(cache_paths["futures"])
 
     return {
         "prices": prices,
         "equity_ey": equity_ey,
         "bond_yields": bond_yields,
         "rf": rf,
+        "futures": futures,
     }
 
 # ---- Test ----
@@ -176,3 +202,13 @@ if __name__ == "__main__":
     print(f"Shape: {rf.shape}")
     print(f"Latest daily return: {rf.iloc[-1]:.6f} "
           f"(annualized: {rf.iloc[-1] * TRADING_DAYS_PER_YEAR:.2%})")
+    
+    futures = data["futures"]
+    print("=== Commodity futures (front + second month) ===")
+    print(f"Shape: {futures.shape}")
+    print(f"Commodities: {sorted(set(c.split('_')[0] for c in futures.columns))}")
+    print("First-valid date per series:")
+    print(futures.apply(lambda c: c.first_valid_index().date()).to_string())
+    print()
+    print("Latest prices:")
+    print(futures.iloc[-1].to_string(float_format="{:.2f}".format))

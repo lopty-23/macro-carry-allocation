@@ -74,6 +74,7 @@ Weights generated on month-end `t` are held from the open of `t+1` onwards — a
 
 ## Project Structure
 
+```
 macro-carry-allocation/
 ├── README.md
 ├── requirements.txt
@@ -95,6 +96,7 @@ macro-carry-allocation/
 ├── rolling_sharpe.png
 ├── weights_history.png
 └── metrics_table.png
+```
 
 Each module exposes a `__main__` smoke test that runs in isolation. The full pipeline is executed by `python src/make_charts.py`.
 

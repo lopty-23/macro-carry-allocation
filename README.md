@@ -114,13 +114,54 @@ All data sourced from a **Bloomberg Terminal** via manual BDH export. The raw `.
 
 Date range: 2003-01-01 to present.
 
-## v2 — Planned
+## v2 — Learning the signal blend (results)
 
-The hand-coded 50/50 trend/carry blend is the obvious starting point but is unlikely to be optimal. v2 replaces it with regression-learned weights from a **walk-forward (expanding-window) framework**:
+We hypothesized that the hand-coded 50/50 blend of trend and carry signals in v1 might be improved by learning the blend weights from historical data. v2 implements a **walk-forward (expanding-window) OLS regression** of next-month asset returns on (z_trend, z_carry), refit each month using all prior data. The learned β coefficients replace v1's fixed 0.5/0.5 weighting at each rebalance date.
 
-1. At each rebalance date `t`, train a Lasso/Ridge regression on (z_trend, z_carry) → next-month asset return using only data through `t`.
-2. Use the learned coefficients to blend signals for `t+1`'s positions.
-3. Re-train monthly; concatenate all out-of-sample predictions into the live backtest.
+Two formulations were tested:
+- **v2a**: regression on raw next-month asset returns.
+- **v2b**: regression on cross-sectionally demeaned returns, to isolate the signal's ranking value from market-wide moves.
+
+Both v2 formulations are evaluated on the same window as v1 from 2008-02-01 onwards (when v2's first valid composite is available, after the 60-month initial training period).
+
+### Results
+
+![v1 vs v2 metrics](results/compare_metrics.png)
+
+| Metric | v1 (0.5/0.5) | v2 (learned) | Δ |
+|---|---:|---:|---:|
+| CAGR | 7.90% | 7.12% | −0.78% |
+| Volatility | 10.84% | 10.67% | −0.17% |
+| Sharpe ratio | 0.63 | 0.57 | −0.06 |
+| Sortino ratio | 0.79 | 0.73 | −0.06 |
+| Max drawdown | −22.45% | −26.32% | −3.87% |
+| Calmar ratio | 0.35 | 0.27 | −0.08 |
+
+![Equity curves](results/compare_equity.png)
+![Drawdown comparison](results/compare_drawdown.png)
+![Learned coefficients over time](results/compare_coefs.png)
+
+**v2 underperformed v1 across every risk-adjusted metric.** The learned β coefficients show a 13x range across the walk-forward (β_trend from 0.0007 to 0.0084) but the variation was not predictive — month-to-month coefficient adjustments responded to estimation noise rather than persistent structural changes in the signal-return relationship.
+
+### Interpretation
+
+This is consistent with the well-documented "Markowitz problem" in portfolio optimization: estimation error in optimal weights can exceed the benefit of adapting weights over time. Real-world examples include AQR's findings that fixed-weight factor blends often outperform dynamically-optimized ones, and the Treynor-Black critique of mean-variance optimization more broadly.
+
+Three concrete takeaways:
+
+1. **v1's hand-coded 50/50 blend was already near-optimal for this signal set and universe.** The mean learned ratio β_carry / β_trend across the walk-forward was 0.91 (v2a) and 0.72 (v2b), both close to v1's implicit ratio of 1.0.
+
+2. **Monthly-frequency macro factor signals carry insufficient information density to support stable weight learning.** With roughly 540 (asset, month) observations in the initial training window, β estimates have standard errors large enough that month-to-month adjustments inject more noise than signal.
+
+3. **The cross-sectional demeaning fix (v2b) didn't help.** The hypothesis was that market-wide return co-movement was distorting the regression; in fact, removing it made performance slightly worse, suggesting the issue is fundamental to learning at this frequency rather than a fixable specification error.
+
+### Why Model B (per-asset-class regressions) was not pursued
+
+The original v2 plan included an extension to three per-asset-class regressions (equities / bonds / real assets) if Model A succeeded. Because Model A's failure was diagnosed as estimation noise rather than missing signal heterogeneity, the per-class extension would have made the problem worse (~150-200 observations per class versus ~540 for the global regression) and was abandoned.
+
+### Suggested next direction
+
+Improving this strategy further is more likely to come from **sensitivity testing the portfolio construction parameters** (TOP_N, vol target, vol lookback) than from further ML iteration on the signal blend. The structural decisions in `portfolio.py` (e.g., the choice of top-4 over top-3 or top-5; the 10% vol target; the 63-day vol lookback) were chosen heuristically and likely have more performance leverage than the trend/carry blend ratio.
 
 ## References
 

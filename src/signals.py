@@ -277,6 +277,94 @@ def compute_composite_signal(
         "composite":  composite,
     }
 
+V2_TRAIN_MIN_MONTHS: int = 60  
+V2_COEF_CAP: float = 2.0
+
+def _fit_blend_coefficients(
+    z_trend_history: pd.DataFrame,
+    z_carry_history: pd.DataFrame,
+    returns_history: pd.DataFrame,
+) -> tuple[float, float]:
+    z_t = z_trend_history.stack()
+    z_c = z_carry_history.stack()
+    y   = returns_history.stack()
+    panel = pd.concat([z_t, z_c, y], axis=1, keys=["zt", "zc", "y"]).dropna()
+
+    if len(panel) < 30:
+        return 0.5, 0.5
+    
+    X = np.column_stack([np.ones(len(panel)), panel["zt"].values, panel["zc"].values])
+    y_vec = panel["y"].values
+    coefs, *_ = np.linalg.lstsq(X, y_vec, rcond=None)
+
+    beta_trend = float(np.clip(coefs[1], -V2_COEF_CAP, V2_COEF_CAP))
+    beta_carry = float(np.clip(coefs[2], -V2_COEF_CAP, V2_COEF_CAP))
+    return beta_trend, beta_carry
+
+
+def compute_composite_signal_v2(
+    prices, equity_ey, bond_yields, rf_daily, futures,
+    risk_assets=RISK_ASSETS,
+    trend_lookback=TREND_LOOKBACK_DAYS,
+    winsorize_k=WINSORIZE_K,
+    train_min_months=V2_TRAIN_MIN_MONTHS,
+) -> dict:
+    rebalance_dates = month_end_rebalance_dates(prices[risk_assets])
+    rf_annual = rf_daily * TRADING_DAYS_PER_YEAR
+
+    raw_trend = compute_trend(prices[risk_assets], rebalance_dates, trend_lookback)
+    raw_carry = compute_carry(
+        equity_ey, bond_yields, rf_annual, futures, rebalance_dates, risk_assets,
+    )
+    wins_trend = winsorize_panel(raw_trend, k=winsorize_k)
+    wins_carry = winsorize_panel(raw_carry, k=winsorize_k)
+    z_trend = zscore_panel(wins_trend)
+    z_carry = zscore_panel(wins_carry)
+
+    # Next-month asset returns from month-end to next month-end,
+    # cross-sectionally demeaned so the regression learns relative
+    # outperformance rather than absolute return.
+    monthly_prices = prices[risk_assets].reindex(rebalance_dates, method="ffill")
+    next_month_returns_raw = monthly_prices.pct_change().shift(-1)
+    next_month_returns = next_month_returns_raw.sub(
+        next_month_returns_raw.mean(axis=1), axis=0,
+    )
+
+    composite = pd.DataFrame(np.nan, index=rebalance_dates, columns=risk_assets)
+    learned_coefs = pd.DataFrame(np.nan, index=rebalance_dates,
+                                 columns=["beta_trend", "beta_carry"])
+
+    for i, t in enumerate(rebalance_dates):
+        if i < train_min_months:
+            continue
+        train_dates = rebalance_dates[:i]
+        beta_t, beta_c = _fit_blend_coefficients(
+            z_trend.loc[train_dates],
+            z_carry.loc[train_dates],
+            next_month_returns.loc[train_dates],
+            )
+        learned_coefs.loc[t] = [beta_t, beta_c]
+
+        zt_t = z_trend.loc[t]
+        zc_t = z_carry.loc[t]
+        both = zt_t.notna() & zc_t.notna()
+        only_t = zt_t.notna() & zc_t.isna()
+        row = pd.Series(np.nan, index=risk_assets)
+        row[both] = beta_t * zt_t[both] + beta_c * zc_t[both]
+        row[only_t] = beta_t * zt_t[only_t]   # only trend, weighted by its learned beta
+        composite.loc[t] = row
+
+    return {
+        "rebalance_dates": rebalance_dates,
+        "raw_trend": raw_trend, "raw_carry": raw_carry,
+        "wins_trend": wins_trend, "wins_carry": wins_carry,
+        "z_trend": z_trend, "z_carry": z_carry,
+        "composite": composite,
+        "learned_coefs": learned_coefs,
+        "next_month_returns": next_month_returns,
+    }
+
+
 # ---- Smoke test ----
 
 if __name__ == "__main__":
@@ -316,6 +404,27 @@ if __name__ == "__main__":
     })
     print(snapshot.to_string(float_format="{:+.3f}".format))
     print()
+
+    # v2 smoke test
+    print("\n=== v2: walk-forward learned blend ===")
+    result_v2 = compute_composite_signal_v2(
+        prices=data["prices"], equity_ey=data["equity_ey"],
+        bond_yields=data["bond_yields"], rf_daily=data["rf"],
+        futures=data["futures"],
+    )
+
+    coefs = result_v2["learned_coefs"].dropna()
+    print(f"Learned coefs computed for {len(coefs)} rebalance dates "
+          f"(from {coefs.index[0].date()} to {coefs.index[-1].date()})")
+    print()
+    print("First 5 learned coefficients:")
+    print(coefs.head().to_string(float_format="{:+.3f}".format))
+    print()
+    print("Last 5 learned coefficients:")
+    print(coefs.tail().to_string(float_format="{:+.3f}".format))
+    print()
+    print("Summary statistics:")
+    print(coefs.describe().to_string(float_format="{:+.3f}".format))
 
     # Verify z-scores have mean ~0 and std ~1 cross-sectionally
     z_trend_snap = result["z_trend"].loc[nearest].dropna()
